@@ -82,12 +82,17 @@ jobs:
   
     # Install cross
     - name: Install Cross
+      if: runner.os != 'macOS'
       run: cargo install cross --git https://github.com/cross-rs/cross
+
+    - name: Install Rust target (macOS only)
+      if: runner.os == 'macOS'
+      run: rustup target add ${{ matrix.target }}
   
     # Build
     - name: Build
       run: |
-        if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+        if [[ "${{ runner.os }}" == "macOS" ]]; then
           cargo build --release --target ${{ matrix.target }}
         else
           cross build --release --target ${{ matrix.target }}
