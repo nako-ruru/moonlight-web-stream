@@ -22,7 +22,7 @@ jobs:
         include:
           - target: x86_64-apple-darwin
             app-suffix: ""
-            os: macos-latest
+            os: self-hosted
           - target: aarch64-apple-darwin
             app-suffix: ""
             os: macos-latest
