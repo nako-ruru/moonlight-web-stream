@@ -6,6 +6,10 @@ on:
       tag:
         description: "Tag to build"
         required: true
+      prerelease_flag:
+        description: "是否标记为预发布 (Pre-release)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -125,6 +129,10 @@ jobs:
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.tag }}
+          name: "Release ${{ github.event.inputs.tag }} (macOS Build)"
+          # 这里引用也要同步修改
+          prerelease: ${{ github.event.inputs.prerelease_flag }}
           files: ${{ env.ASSET }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
