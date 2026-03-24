@@ -1,12 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - '**'
-    tags:
-      - 'v*'
-  pull_request:
   workflow_dispatch:
     inputs:
       tag:
@@ -66,7 +60,7 @@ jobs:
     - name: Build
       run: |
         if [[ "${{ runner.os }}" == "macOS" ]]; then
-          export MACOSX_DEPLOYMENT_TARGET=12.0
+          export RUSTFLAGS="-C link-arg=/Library/Developer/CommandLineTools/usr/lib/clang/16/lib/darwin/libclang_rt.osx.a"
           cargo build --release --target ${{ matrix.target }}
         else
           cross build --release --target ${{ matrix.target }}
