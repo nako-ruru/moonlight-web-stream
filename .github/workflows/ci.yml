@@ -87,7 +87,11 @@ jobs:
     # Build
     - name: Build
       run: |
-        cross build --release --target ${{ matrix.target }}
+        if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+          cargo build --release --target ${{ matrix.target }}
+        else
+          cross build --release --target ${{ matrix.target }}
+        fi
   
         npm ci
         npm run build
