@@ -60,7 +60,9 @@ jobs:
     - name: Build
       run: |
         if [[ "${{ runner.os }}" == "macOS" ]]; then
-          export RUSTFLAGS="-C link-arg=/Library/Developer/CommandLineTools/usr/lib/clang/16/lib/darwin/libclang_rt.osx.a"
+          if [[ "${{ runner.arch }}" == "X64" ]]; then
+            export RUSTFLAGS="-C link-arg=$(ls /Library/Developer/CommandLineTools/usr/lib/clang/*/lib/darwin/libclang_rt.osx.a | head -n 1)"
+          fi
           cargo build --release --target ${{ matrix.target }}
         else
           cross build --release --target ${{ matrix.target }}
