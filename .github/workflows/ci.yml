@@ -93,6 +93,7 @@ jobs:
     - name: Build
       run: |
         if [[ "${{ runner.os }}" == "macOS" ]]; then
+          export MACOSX_DEPLOYMENT_TARGET=12.0
           cargo build --release --target ${{ matrix.target }}
         else
           cross build --release --target ${{ matrix.target }}
