@@ -137,3 +137,18 @@ jobs:
           files: ${{ env.ASSET }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create static.zip
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          cd package
+          zip -r ../static.zip static
+      
+      - name: Upload static.zip to release
+        if: matrix.target == 'aarch64-apple-darwin'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          files: static.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
