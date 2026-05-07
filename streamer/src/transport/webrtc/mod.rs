@@ -8,7 +8,6 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use common::{
-    StreamSettings,
     api_bindings::{
         RtcIceCandidate, RtcSdpType, RtcSessionDescription, StreamClientMessage,
         StreamServerMessage, StreamSignalingMessage, TransportChannelId,
@@ -16,10 +15,9 @@ use common::{
     config::{PortRange, WebRtcConfig},
     ipc::{ServerIpcMessage, StreamerIpcMessage},
 };
-use log::{debug, error, trace, warn};
 use moonlight_common::stream::{
     audio::{AudioConfig, OpusMultistreamConfig},
-    video::{DecodeResult, SupportedVideoFormats, VideoDecodeUnit, VideoSetup},
+    video::{DecodeResult, VideoDecodeUnit, VideoFormats, VideoSetup},
 };
 use tokio::{
     runtime::Handle,
@@ -30,12 +28,16 @@ use tokio::{
     },
     time::sleep,
 };
+use tracing::{debug, error, trace, warn};
 use webrtc::{
     api::{
         APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
         setting_engine::SettingEngine,
     },
-    data_channel::{RTCDataChannel, data_channel_message::DataChannelMessage},
+    data_channel::{
+        RTCDataChannel, data_channel_init::RTCDataChannelInit,
+        data_channel_message::DataChannelMessage,
+    },
     ice::udp_network::{EphemeralUDP, UDPNetwork},
     ice_transport::{
         ice_candidate::{RTCIceCandidate, RTCIceCandidateInit},
@@ -74,7 +76,8 @@ struct WebRtcInner {
     peer: Arc<RTCPeerConnection>,
     event_sender: Sender<TransportEvent>,
     general_channel: Arc<RTCDataChannel>,
-    stats_channel: Mutex<Option<Arc<RTCDataChannel>>>,
+    stats_channel: Arc<RTCDataChannel>,
+    input_channels: Mutex<Vec<Arc<RTCDataChannel>>>,
     video: Mutex<WebRtcVideo>,
     audio: Mutex<WebRtcAudio>,
     // Timeout / Terminate
@@ -150,13 +153,15 @@ pub async fn new(
     let peer = Arc::new(api.new_peer_connection(rtc_config).await?);
 
     let general_channel = peer.create_data_channel("general", None).await?;
+    let stats_channel = peer.create_data_channel("stats", None).await?;
 
     let runtime = Handle::current();
     let this_owned = Arc::new(WebRtcInner {
         peer: peer.clone(),
         event_sender,
         general_channel: general_channel.clone(),
-        stats_channel: Mutex::new(None),
+        stats_channel,
+        input_channels: Default::default(),
         video: Mutex::new(WebRtcVideo::new(
             runtime.clone(),
             Arc::downgrade(&peer),
@@ -170,10 +175,59 @@ pub async fn new(
         timeout_terminate_request: Mutex::new(None),
     });
 
-    // don't forget to register the general channel created by us
+    // Add all data channels. The server creates all data channels
     {
         let this = this_owned.clone();
-        this.on_data_channel(general_channel).await;
+        this.clone().on_data_channel(general_channel).await;
+
+        struct Options {
+            reliable: bool,
+            ordered: bool,
+        }
+        #[rustfmt::skip]
+        const INPUT_CHANNELS: &[(&str, Options)] = &[
+            ("mouse_reliable", Options { reliable: true , ordered: true  }),
+            ("mouse_absolute", Options { reliable: false, ordered: false }),
+            ("mouse_relative", Options { reliable: true , ordered: false }),
+            ("keyboard",       Options { reliable: true , ordered: true  }),
+            ("touch",          Options { reliable: true , ordered: true  }),
+            ("controllers",    Options { reliable: true , ordered: true  }),
+            ("controller0",    Options { reliable: false, ordered: false }),
+            ("controller1",    Options { reliable: false, ordered: false }),
+            ("controller2",    Options { reliable: false, ordered: false }),
+            ("controller3",    Options { reliable: false, ordered: false }),
+            ("controller4",    Options { reliable: false, ordered: false }),
+            ("controller5",    Options { reliable: false, ordered: false }),
+            ("controller6",    Options { reliable: false, ordered: false }),
+            ("controller7",    Options { reliable: false, ordered: false }),
+            ("controller8",    Options { reliable: false, ordered: false }),
+            ("controller9",    Options { reliable: false, ordered: false }),
+            ("controller10",   Options { reliable: false, ordered: false }),
+            ("controller11",   Options { reliable: false, ordered: false }),
+            ("controller12",   Options { reliable: false, ordered: false }),
+            ("controller13",   Options { reliable: false, ordered: false }),
+            ("controller14",   Options { reliable: false, ordered: false }),
+            ("controller15",   Options { reliable: false, ordered: false }),
+        ];
+
+        let mut input_channels = this.input_channels.lock().await;
+        for (channel, options) in INPUT_CHANNELS {
+            let data_channel = this
+                .peer
+                .create_data_channel(
+                    channel,
+                    Some(RTCDataChannelInit {
+                        ordered: Some(options.ordered),
+                        max_retransmits: (!options.reliable).then_some(0),
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+
+            this.clone().on_data_channel(data_channel.clone()).await;
+
+            input_channels.push(data_channel);
+        }
     }
 
     let this = Arc::downgrade(&this_owned);
@@ -197,14 +251,6 @@ pub async fn new(
         this.clone(),
         async move |this, candidate| {
             this.on_ice_candidate(candidate).await;
-        },
-    ));
-
-    // -- Data Channels
-    peer.on_data_channel(create_event_handler(
-        this.clone(),
-        async move |this, channel| {
-            this.on_data_channel(channel).await;
         },
     ));
 
@@ -297,47 +343,6 @@ impl WebRtcInner {
     }
 
     // -- Handle Signaling
-    #[allow(unused)]
-    async fn send_answer(&self) -> bool {
-        let local_description = match self.peer.create_answer(None).await {
-            Err(err) => {
-                warn!("[Signaling]: failed to create answer: {err:?}");
-                return false;
-            }
-            Ok(value) => value,
-        };
-
-        if let Err(err) = self
-            .peer
-            .set_local_description(local_description.clone())
-            .await
-        {
-            warn!("[Signaling]: failed to set local description: {err:?}");
-            return false;
-        }
-
-        debug!(
-            "[Signaling] Sending Local Description as Answer: {:?}",
-            local_description.sdp
-        );
-
-        if let Err(err) = self
-            .event_sender
-            .send(TransportEvent::SendIpc(StreamerIpcMessage::WebSocket(
-                StreamServerMessage::WebRtc(StreamSignalingMessage::Description(
-                    RtcSessionDescription {
-                        ty: from_webrtc_sdp(local_description.sdp_type),
-                        sdp: local_description.sdp,
-                    },
-                )),
-            )))
-            .await
-        {
-            warn!("Failed to send local description (answer) via web socket from peer: {err:?}");
-        }
-
-        true
-    }
     async fn send_offer(&self) -> bool {
         let local_description = match self.peer.create_offer(None).await {
             Err(err) => {
@@ -381,22 +386,15 @@ impl WebRtcInner {
 
     async fn on_ws_message(&self, message: StreamClientMessage) {
         match message {
-            StreamClientMessage::StartStream {
-                bitrate,
-                packet_size,
-                fps,
-                width,
-                height,
-                play_audio_local,
-                video_supported_formats,
-                video_colorspace,
-                video_color_range_full,
-                hdr,
-            } => {
-                let video_supported_formats = SupportedVideoFormats::from_bits(video_supported_formats).unwrap_or_else(|| {
-                    warn!("Failed to deserialize SupportedVideoFormats: {video_supported_formats}, falling back to only H264");
-                    SupportedVideoFormats::H264
-                });
+            StreamClientMessage::StartStream { settings } => {
+                let video_supported_formats = VideoFormats::from_bits(settings.supported_codecs)
+                    .unwrap_or_else(|| {
+                        warn!(
+                            "Failed to deserialize VideoFormats: {}, falling back to only H264",
+                            VideoFormats::from_bits_retain(settings.supported_codecs)
+                        );
+                        VideoFormats::H264
+                    });
                 {
                     let mut video = self.video.lock().await;
                     video.set_codecs(video_supported_formats).await;
@@ -406,20 +404,7 @@ impl WebRtcInner {
 
                 if let Err(err) = self
                     .event_sender
-                    .send(TransportEvent::StartStream {
-                        settings: StreamSettings {
-                            bitrate,
-                            packet_size,
-                            fps,
-                            width,
-                            height,
-                            video_supported_formats,
-                            video_color_range_full,
-                            video_colorspace: video_colorspace.into(),
-                            play_audio_local,
-                            hdr,
-                        },
-                    })
+                    .send(TransportEvent::StartStream { settings })
                     .await
                 {
                     error!("Failed to send start stream: {err}");
@@ -449,13 +434,13 @@ impl WebRtcInner {
                 let remote_ty = description.sdp_type;
 
                 if remote_ty == RTCSdpType::Offer {
-                    // Send an offer if we got an offer because we want to make the offer
-                    // This makes negotiation more stable and consistant
-                    self.send_offer().await;
-                } else {
-                    if let Err(err) = self.peer.set_remote_description(description).await {
-                        error!("[Signaling]: failed to set remote description: {err:?}");
-                    }
+                    warn!(
+                        "Received an offer from the client. This shouldn't be possible. Dropping the offer"
+                    );
+                    return;
+                }
+                if let Err(err) = self.peer.set_remote_description(description).await {
+                    error!("[Signaling]: failed to set remote description: {err:?}");
                 }
             }
             StreamClientMessage::WebRtc(StreamSignalingMessage::AddIceCandidate(description)) => {
@@ -525,28 +510,6 @@ impl WebRtcInner {
                     TransportChannel(TransportChannelId::GENERAL),
                 ));
             }
-            "stats" => {
-                let mut stats = self.stats_channel.lock().await;
-
-                channel.on_close({
-                    let this = Arc::downgrade(&self);
-
-                    Box::new(move ||{
-                        let this = this.clone();
-
-                        Box::pin(async move {
-                            let Some(this) = this.upgrade() else {
-                                warn!("Failed to close stats channel because the main type is already deallocated");
-                                return;
-                            };
-
-                            this.close_stats().await;
-                        })
-                    })
-                });
-
-                *stats = Some(channel);
-            }
             "mouse_reliable" | "mouse_absolute" | "mouse_relative" => {
                 channel.on_message(create_channel_message_handler(
                     inner,
@@ -583,12 +546,6 @@ impl WebRtcInner {
                 }
             }
         };
-    }
-
-    async fn close_stats(&self) {
-        let mut stats = self.stats_channel.lock().await;
-
-        *stats = None;
     }
 
     // -- Termination
@@ -651,10 +608,10 @@ impl TransportSender for WebRTCTransportSender {
     }
     async fn send_video_unit<'a>(
         &'a self,
-        unit: &'a VideoDecodeUnit<'a>,
+        unit: VideoDecodeUnit<&'a [u8]>,
     ) -> Result<DecodeResult, TransportError> {
         let mut video = self.inner.video.lock().await;
-        Ok(video.send_decode_unit(unit).await)
+        Ok(video.send_decode_unit(&unit).await)
     }
 
     async fn setup_audio(
@@ -672,6 +629,13 @@ impl TransportSender for WebRTCTransportSender {
         audio.send_audio_sample(data).await;
 
         Ok(())
+    }
+
+    async fn on_setup_complete(&self) {
+        if !self.inner.send_offer().await {
+            error!("Failed to send offer to client. Requesting Termination");
+            self.inner.request_terminate().await;
+        }
     }
 
     async fn send(&self, packet: OutboundPacket) -> Result<(), TransportError> {
@@ -694,17 +658,8 @@ impl TransportSender for WebRTCTransportSender {
                 _ => {}
             },
             TransportChannelId::STATS => {
-                let stats = self.inner.stats_channel.lock().await;
-                if let Some(stats) = stats.as_ref() {
-                    match stats.send(&bytes).await {
-                        Ok(_) => {}
-                        Err(webrtc::Error::ErrDataChannelNotOpen) => {
-                            return Err(TransportError::ChannelClosed);
-                        }
-                        _ => {}
-                    }
-                } else {
-                    return Err(TransportError::ChannelClosed);
+                if let Err(err) = self.inner.stats_channel.send(&bytes).await {
+                    debug!(error = ?err, "Failed to send stat message");
                 }
             }
             _ => {

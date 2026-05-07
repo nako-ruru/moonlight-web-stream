@@ -1,11 +1,13 @@
 import { Component, ComponentEvent } from "./index.js"
-import { getLocalStreamSettings } from "./settings_menu.js"
+import { getLocalStreamSettings, globalDefaultSettings } from "./settings_menu.js"
+import { getCurrentLanguage, getTranslations } from "../i18n.js"
 
 export class ElementWithLabel implements Component {
     protected div: HTMLDivElement = document.createElement("div")
     protected label: HTMLLabelElement = document.createElement("label")
 
     constructor(internalName: string, displayName?: string) {
+        const i = getTranslations(getCurrentLanguage()).common
         if (displayName) {
             this.label.htmlFor = internalName
             this.label.innerText = displayName
@@ -18,6 +20,10 @@ export class ElementWithLabel implements Component {
     }
     unmount(parent: HTMLElement): void {
         parent.removeChild(this.div)
+    }
+
+    mountBefore(parent: HTMLElement, before: ElementWithLabel): void {
+        parent.insertBefore(this.div, before.div)
     }
 }
 
@@ -51,6 +57,7 @@ export class InputComponent extends ElementWithLabel {
 
     constructor(internalName: string, type: string, displayName?: string, init?: InputInit) {
         super(internalName, displayName)
+        const i = getTranslations(getCurrentLanguage()).common
 
         this.div.classList.add("input-div")
 
@@ -86,7 +93,7 @@ export class InputComponent extends ElementWithLabel {
             this.fileLabel.innerText = this.label.innerText
             this.fileLabel.classList.add("file-label")
 
-            this.label.innerText = "Open File"
+            this.label.innerText = i.openFile
             this.label.classList.add("file-button")
 
             this.div.insertBefore(this.fileLabel, this.label)
@@ -164,6 +171,9 @@ export class InputComponent extends ElementWithLabel {
         return this.input.value
     }
 
+    setChecked(checked: boolean) {
+        this.input.checked = checked
+    }
     isChecked(): boolean {
         return this.input.checked
     }
@@ -219,7 +229,7 @@ type SelectStrategy =
     { name: "polyfill", opened: boolean, wrapper: HTMLDivElement, display: HTMLParagraphElement, list: HTMLDivElement, value: string | null, disabled: Set<string> }
 
 function useSelectElementPolyfill(): boolean {
-    return getLocalStreamSettings()?.useSelectElementPolyfill ?? false
+    return getLocalStreamSettings(globalDefaultSettings())?.useSelectElementPolyfill ?? false
 }
 
 export class SelectComponent extends ElementWithLabel {
@@ -453,7 +463,8 @@ export class SelectComponent extends ElementWithLabel {
         const value = this.strategy.value
         const selectedOption = this.options.find(option => option.value == value)
 
-        this.strategy.display.innerText = selectedOption?.name ?? "(Not Selected)"
+        const i = getTranslations(getCurrentLanguage()).common
+        this.strategy.display.innerText = selectedOption?.name ?? i.notSelected
     }
     private setStrategyPolyfillOpened(opened: boolean) {
         if (this.strategy.name != "polyfill") {

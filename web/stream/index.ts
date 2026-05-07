@@ -1,14 +1,14 @@
 import { Api } from "../api.js"
-import { App, ConnectionStatus, GeneralClientMessage, GeneralServerMessage, StreamCapabilities, StreamClientMessage, StreamServerMessage, TransportChannelId } from "../api_bindings.js"
+import { App, ConnectionStatus, GeneralClientMessage, GeneralServerMessage, StreamCapabilities, StreamClientMessage, StreamPermissions, StreamServerMessage, StreamSettings, TransportChannelId } from "../api_bindings.js"
 import { showErrorPopup } from "../component/error.js"
 import { Component } from "../component/index.js"
-import { Settings } from "../component/settings_menu.js"
+import { Settings, TransportType } from "../component/settings_menu.js"
 import { AudioPlayer } from "./audio/index.js"
 import { buildAudioPipeline } from "./audio/pipeline.js"
 import { BIG_BUFFER, ByteBuffer } from "./buffer.js"
 import { defaultStreamInputConfig, StreamInput } from "./input.js"
 import { Logger, LogMessageInfo } from "./log.js"
-import { gatherPipeInfo, getPipe } from "./pipeline/index.js"
+import { gatherPipeInfo } from "./pipeline/index.js"
 import { StreamStats } from "./stats.js"
 import { Transport, TransportShutdown } from "./transport/index.js"
 import { WebSocketTransport } from "./transport/web_socket.js"
@@ -77,6 +77,9 @@ function getVideoCodecHint(settings: Settings): VideoCodecSupport {
     return videoCodecHint
 }
 
+const WEBRTC_CONNECT_TIMEOUT_MS = 15000
+const FALLBACK_RECONNECT_DELAY_MS = 500
+
 export class Stream implements Component {
     private logger: Logger = new Logger()
 
@@ -85,6 +88,7 @@ export class Stream implements Component {
     private hostId: number
     private appId: number
 
+    private permissions: StreamPermissions
     private settings: Settings
 
     private divElement = document.createElement("div")
@@ -92,6 +96,7 @@ export class Stream implements Component {
 
     private ws: WebSocket
     private iceServers: Array<RTCIceServer> | null = null
+    private transportOverride: TransportType | null = null
 
     private videoRenderer: VideoRenderer | null = null
     private audioPlayer: AudioPlayer | null = null
@@ -101,7 +106,7 @@ export class Stream implements Component {
 
     private streamerSize: [number, number]
 
-    constructor(api: Api, hostId: number, appId: number, settings: Settings, viewerScreenSize: [number, number]) {
+    constructor(api: Api, hostId: number, appId: number, settings: Settings, viewerScreenSize: [number, number], permissions: StreamPermissions) {
         this.logger.addInfoListener((info, type) => {
             this.debugLog(info, { type: type ?? undefined })
         })
@@ -111,37 +116,27 @@ export class Stream implements Component {
         this.hostId = hostId
         this.appId = appId
 
+        this.permissions = permissions
         this.settings = settings
 
         this.streamerSize = getStreamerSize(settings, viewerScreenSize)
 
-        // Configure web socket
-        const wsApiHost = api.host_url.replace(/^http(s)?:/, "ws$1:")
-        this.ws = new WebSocket(`${wsApiHost}/host/stream`)
-        this.ws.addEventListener("error", this.onError.bind(this))
-        this.ws.addEventListener("open", this.onWsOpen.bind(this))
-        this.ws.addEventListener("close", this.onWsClose.bind(this))
-        this.ws.addEventListener("message", this.onRawWsMessage.bind(this))
-
-        this.sendWsMessage({
-            Init: {
-                host_id: this.hostId,
-                app_id: this.appId,
-                video_frame_queue_size: this.settings.videoFrameQueueSize,
-                audio_sample_queue_size: this.settings.audioSampleQueueSize,
-            }
-        })
+        this.ws = this.createControlWebSocket()
+        this.sendInitMessage()
 
         // Stream Input
         const streamInputConfig = defaultStreamInputConfig()
         Object.assign(streamInputConfig, {
+            mouseMode: this.settings.mouseMode,
             mouseScrollMode: this.settings.mouseScrollMode,
+            touchMode: this.settings.touchMode,
+            localCursorSensitivity: this.settings.localCursorSensitivity,
             controllerConfig: this.settings.controllerConfig
         })
         this.input = new StreamInput(streamInputConfig)
 
         // Stream Stats
-        this.stats = new StreamStats()
+        this.stats = new StreamStats(this.logger)
     }
 
     private debugLog(message: string, additional?: LogMessageInfo) {
@@ -258,18 +253,22 @@ export class Stream implements Component {
     }
 
     async startConnection() {
-        this.debugLog(`Using transport: ${this.settings.dataTransport}`)
+        this.debugLog(`Permissions: ${JSON.stringify(this.permissions)}`)
 
-        if (this.settings.dataTransport == "auto") {
+        const desiredTransport = this.transportOverride ?? this.settings.dataTransport
+        this.debugLog(`Using transport: ${desiredTransport}`)
+
+        if (desiredTransport == "auto") {
             let shutdownReason = await this.tryWebRTCTransport()
 
             if (shutdownReason == "failednoconnect") {
                 this.debugLog("Failed to establish WebRTC connection. Falling back to Web Socket transport.", { type: "ifErrorDescription" })
-                await this.tryWebSocketTransport()
+                await this.restartWithFreshTransportFallback("websocket")
+                return
             }
-        } else if (this.settings.dataTransport == "webrtc") {
+        } else if (desiredTransport == "webrtc") {
             await this.tryWebRTCTransport()
-        } else if (this.settings.dataTransport == "websocket") {
+        } else if (desiredTransport == "websocket") {
             await this.tryWebSocketTransport()
         }
 
@@ -277,6 +276,75 @@ export class Stream implements Component {
     }
 
     private transport: Transport | null = null
+
+    private createControlWebSocket(): WebSocket {
+        const wsApiHost = this.api.host_url.replace(/^http(s)?:/, "ws$1:")
+        const ws = new WebSocket(`${wsApiHost}/host/stream`)
+
+        ws.addEventListener("error", (event) => {
+            if (this.ws !== ws) {
+                return
+            }
+            this.onError(event)
+        })
+        ws.addEventListener("open", () => {
+            if (this.ws !== ws) {
+                return
+            }
+            this.onWsOpen()
+        })
+        ws.addEventListener("close", () => {
+            if (this.ws !== ws) {
+                return
+            }
+            this.onWsClose()
+        })
+        ws.addEventListener("message", (event) => {
+            if (this.ws !== ws) {
+                return
+            }
+            this.onRawWsMessage(event)
+        })
+
+        return ws
+    }
+    private sendInitMessage() {
+        this.sendWsMessage({
+            Init: {
+                host_id: this.hostId,
+                app_id: this.appId,
+                video_frame_queue_size: this.settings.videoFrameQueueSize,
+                audio_sample_queue_size: this.settings.audioSampleQueueSize,
+            }
+        })
+    }
+    private async restartWithFreshTransportFallback(transport: TransportType): Promise<void> {
+        this.transportOverride = transport
+
+        if (this.transport) {
+            await this.transport.close()
+            this.transport = null
+        }
+
+        this.wsSendBuffer.length = 0
+        const oldWs = this.ws
+
+        if (oldWs.readyState == WebSocket.OPEN || oldWs.readyState == WebSocket.CONNECTING) {
+            oldWs.close()
+            await new Promise<void>((resolve) => {
+                const timeout = window.setTimeout(() => resolve(), 1000)
+                oldWs.addEventListener("close", () => {
+                    window.clearTimeout(timeout)
+                    resolve()
+                }, { once: true })
+            })
+        }
+
+        await new Promise((resolve) => window.setTimeout(resolve, FALLBACK_RECONNECT_DELAY_MS))
+
+        this.ws = this.createControlWebSocket()
+        this.sendInitMessage()
+    }
 
     private setTransport(transport: Transport) {
         if (this.transport) {
@@ -391,6 +459,11 @@ export class Stream implements Component {
     }
 
     private async tryWebRTCTransport(): Promise<TransportShutdown> {
+        if (!this.permissions.allow_transport_webrtc) {
+            this.debugLog("Not trying WebRTC transport because permissions disallow it")
+            return "failednoconnect"
+        }
+
         this.debugLog("Trying WebRTC transport")
 
         this.sendWsMessage({
@@ -410,28 +483,6 @@ export class Stream implements Component {
         })
         this.setTransport(transport)
 
-        // Wait for negotiation
-        const result = await (new Promise((resolve, _reject) => {
-            transport.onconnect = () => resolve(true)
-            transport.onclose = () => resolve(false)
-        }))
-        this.debugLog(`WebRTC negotiation success: ${result}`)
-
-        if (!result) {
-            return "failednoconnect"
-        }
-
-        // Print pipe support
-        const pipesInfo = await gatherPipeInfo()
-
-        this.logger.debug(`Supported Pipes: {`)
-        let isFirst = true
-        for (const [key, value] of pipesInfo.entries()) {
-            this.logger.debug(`${isFirst ? "" : ","}"${getPipe(key)?.name}": ${JSON.stringify(value)}`)
-            isFirst = false
-        }
-        this.logger.debug(`}`)
-
         const videoCodecSupport = await this.createPipelines()
         if (!videoCodecSupport) {
             this.debugLog("No video pipeline was found for the codec that was specified. If you're unsure which codecs are supported use H264.", { type: "fatalDescription" })
@@ -440,15 +491,46 @@ export class Stream implements Component {
             return "failednoconnect"
         }
 
+        // Starting the stream will start negotiation
         await this.startStream(videoCodecSupport)
 
-        return new Promise((resolve, reject) => {
+        // Wait for negotiation, but don't let a stuck ICE check block fallback forever.
+        const result = await new Promise<boolean>((resolve) => {
+            const timeout = window.setTimeout(async () => {
+                this.debugLog(`WebRTC negotiation timed out after ${WEBRTC_CONNECT_TIMEOUT_MS}ms`)
+                transport.onconnect = null
+                transport.onclose = null
+                await transport.close()
+                resolve(false)
+            }, WEBRTC_CONNECT_TIMEOUT_MS)
+
+            transport.onconnect = () => {
+                window.clearTimeout(timeout)
+                resolve(true)
+            }
+            transport.onclose = () => {
+                window.clearTimeout(timeout)
+                resolve(false)
+            }
+        })
+        this.debugLog(`WebRTC negotiation success: ${result}`)
+
+        if (!result) {
+            return "failednoconnect"
+        }
+
+        return new Promise((resolve) => {
             transport.onclose = (shutdown) => {
                 resolve(shutdown)
             }
         })
     }
     private async tryWebSocketTransport() {
+        if (!this.permissions.allow_transport_websockets) {
+            this.debugLog("Not trying WebSocket transport becaues permissions disallow it")
+            return
+        }
+
         this.debugLog("Trying Web Socket transport")
 
         this.sendWsMessage({
@@ -467,7 +549,7 @@ export class Stream implements Component {
 
         await this.startStream(videoCodecSupport)
 
-        return new Promise((resolve, reject) => {
+        return new Promise((resolve) => {
             transport.onclose = (shutdown) => {
                 resolve(shutdown)
             }
@@ -635,18 +717,19 @@ export class Stream implements Component {
         return true
     }
     private async startStream(videoCodecSupport: VideoCodecSupport): Promise<void> {
+        const settings: StreamSettings = {
+            bitrate_kbps: this.settings.bitrate,
+            fps: this.settings.fps,
+            width: this.streamerSize[0],
+            height: this.streamerSize[1],
+            play_audio_local: this.settings.playAudioLocal,
+            supported_codecs: createSupportedVideoFormatsBits(videoCodecSupport),
+            hdr: this.settings.hdr ?? false,
+        }
+
         const message: StreamClientMessage = {
             StartStream: {
-                bitrate: this.settings.bitrate,
-                packet_size: this.settings.packetSize,
-                fps: this.settings.fps,
-                width: this.streamerSize[0],
-                height: this.streamerSize[1],
-                play_audio_local: this.settings.playAudioLocal,
-                video_supported_formats: createSupportedVideoFormatsBits(videoCodecSupport),
-                video_colorspace: "Rec709",
-                video_color_range_full: false,
-                hdr: this.settings.hdr ?? false,
+                settings
             }
         }
         this.debugLog(`Starting stream with info: ${JSON.stringify(message)}`)
@@ -747,17 +830,5 @@ export class Stream implements Component {
 }
 
 function createPrettyList(list: Array<string>): string {
-    let isFirst = true
-    let text = "["
-    for (const item of list) {
-        if (!isFirst) {
-            text += ", "
-        }
-        isFirst = false
-
-        text += item
-    }
-    text += "]"
-
-    return text
+    return `[${list.join(", ")}]`
 }

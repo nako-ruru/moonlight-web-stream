@@ -13,7 +13,7 @@ use common::{
     ipc::StreamerIpcMessage,
 };
 use moonlight_common::stream::video::{
-    DecodeResult, FrameType, SupportedVideoFormats, VideoDecodeUnit, VideoFormat, VideoSetup,
+    DecodeResult, FrameType, VideoDecodeUnit, VideoFormat, VideoFormats, VideoSetup,
 };
 use tokio::runtime::Handle;
 use tracing::{debug, error, info, trace, warn};
@@ -54,6 +54,9 @@ mod annexb;
 mod h264;
 mod h265;
 
+// Av1 specification:
+// - https://aomediacodec.github.io/av1-rtp-spec/v1.0.0.html
+
 enum VideoCodec {
     H264 {
         nal_reader: H264Reader<Cursor<Vec<u8>>>,
@@ -70,7 +73,7 @@ enum VideoCodec {
 }
 
 pub struct WebRtcVideo {
-    supported_video_formats: SupportedVideoFormats,
+    supported_video_formats: VideoFormats,
     sender: TrackLocalSender<SequencedTrackLocalStaticRTP>,
     needs_idr: Arc<AtomicBool>,
     clock_rate: u32,
@@ -85,12 +88,12 @@ impl WebRtcVideo {
             needs_idr: Default::default(),
             sender: TrackLocalSender::new(runtime, peer, frame_queue_size),
             codec: None,
-            supported_video_formats: SupportedVideoFormats::empty(),
+            supported_video_formats: VideoFormats::empty(),
             samples: Default::default(),
         }
     }
 
-    pub async fn set_codecs(&mut self, supported_codecs: SupportedVideoFormats) {
+    pub async fn set_codecs(&mut self, supported_codecs: VideoFormats) {
         self.supported_video_formats = supported_codecs;
     }
 
@@ -211,19 +214,14 @@ impl WebRtcVideo {
             }),
         };
 
-        // Renegotiate
-        if !inner.send_offer().await {
-            warn!("Failed to renegotiate. Video was added!");
-        }
-
         true
     }
 
-    pub async fn send_decode_unit(&mut self, unit: &VideoDecodeUnit<'_>) -> DecodeResult {
+    pub async fn send_decode_unit(&mut self, unit: &VideoDecodeUnit<&[u8]>) -> DecodeResult {
         let timestamp = (unit.timestamp.as_nanos() * 90000 / 1_000_000_000) as u32;
 
         let mut full_frame = Vec::new();
-        for buffer in unit.buffers {
+        for buffer in &unit.buffers {
             full_frame.extend_from_slice(buffer.data);
         }
 

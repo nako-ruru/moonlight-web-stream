@@ -27,6 +27,8 @@ pub struct Config {
     pub streamer_path: String,
     #[serde(default)]
     pub log: LogConfig,
+    // TODO: remove this on next major, it was replaced by roles
+    #[deprecated]
     #[serde(default)]
     pub default_settings: Option<Value>,
 }
@@ -40,6 +42,7 @@ impl Default for Config {
             moonlight: Default::default(),
             webrtc: Default::default(),
             log: Default::default(),
+            #[allow(deprecated)]
             default_settings: Default::default(),
         }
     }
@@ -238,7 +241,6 @@ fn default_include_loopback_candidates() -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebServerConfig {
-    // TODO: create streamer overwrite for ice servers
     #[serde(default = "default_bind_address")]
     pub bind_address: SocketAddr,
     pub certificate: Option<ConfigSsl>,
@@ -251,6 +253,7 @@ pub struct WebServerConfig {
     pub first_login_create_admin: bool,
     pub first_login_assign_global_hosts: bool,
     pub default_user_id: Option<u32>,
+    pub default_role_id: Option<u32>,
     pub forwarded_header: Option<ForwardedHeaders>,
 }
 
@@ -271,6 +274,7 @@ impl Default for WebServerConfig {
             first_login_create_admin: true,
             first_login_assign_global_hosts: true,
             default_user_id: None,
+            default_role_id: None,
             forwarded_header: None,
         }
     }

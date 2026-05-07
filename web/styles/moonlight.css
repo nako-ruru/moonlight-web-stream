@@ -81,6 +81,12 @@ button:hover:not(.logout-button):not(.admin-button):not(.open-settings):not(.hos
     box-shadow: none;
 }
 
+
+/* Disable all fancy effects when the button is disabled */
+button:disabled {
+    background-color: gray !important;
+}
+
 .button-fit-content {
     height: fit-content;
 }
@@ -123,6 +129,13 @@ input[type="checkbox"]:checked::after {
     transform: translate(-50%, -50%) scale(1);
     opacity: 1;
 }
+
+input[type="checkbox"]:disabled {
+    color: none;
+    border-color: black;
+    box-shadow: none;
+}
+
 
 /** Slider */
 input[type="range"] {
@@ -266,11 +279,11 @@ input[type=number] {
 .modal-background {
     display: block;
     position: fixed;
-    z-index: 2;
+    z-index: 5000;
     left: 0;
     top: 0;
-    width: 100%;
-    height: 100%;
+    width: 100vw;
+    height: 100vh;
     background-color: rgba(0, 0, 0, 0.4);
     /** animation */
     visibility: visible;
@@ -279,6 +292,8 @@ input[type=number] {
 }
 
 .modal-content {
+    position: relative;
+    z-index: 5001;
     background-color: rgb(86, 92, 100);
 
     margin: 15% auto;
@@ -287,6 +302,9 @@ input[type=number] {
     border-radius: 5px;
 
     width: 80%;
+
+    max-height: 60%;
+    overflow-y: auto;
 }
 
 .modal-disabled {
@@ -831,6 +849,18 @@ canvas.video-stream {
     z-index: 1;
 }
 
+.local-touch-cursor {
+    position: fixed;
+    width: 10px;
+    height: 15px;
+    pointer-events: none;
+    z-index: 3;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 18'%3E%3Cpath fill='%23fff' d='M0 0L0 13L3.8 9.8L6.1 17L8.5 15.9L6.2 8.9L11 8.9Z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-size: 100% 100%;
+    filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.95)) drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45));
+}
+
 .sidebar-stream {
     display: flex;
     flex-direction: column;
@@ -867,13 +897,15 @@ canvas.video-stream {
     margin: 0;
 }
 
-.user-panel {
+.user-panel,
+.role-panel {
     display: flex;
     flex-direction: column;
     max-width: 225px;
 }
 
-.user-list {
+.user-list,
+.role-list {
     display: flex;
     flex-direction: column;
     flex: 1;
@@ -881,7 +913,8 @@ canvas.video-stream {
     overflow-y: auto;
 }
 
-.user-element {
+.user-element,
+.role-element {
     margin: 0;
     padding: 10px;
     min-width: 110px;
@@ -892,22 +925,26 @@ canvas.video-stream {
     background-color: rgba(255, 255, 255, 0);
 }
 
-.user-element:hover {
+.user-element:hover,
+.role-element:hover {
     /** animation */
     transition: all 0.2s;
     background-color: rgba(255, 255, 255, 0.2);
 }
 
-.user-element p {
+.user-element p,
+.role-element p {
     padding: 0;
     margin: 0;
 }
 
-.admin-panel-content {
+.admin-panel-users,
+.admin-panel-roles {
     display: flex;
     flex-direction: row;
 }
 
-.user-info-delete {
+.user-info-delete,
+.role-info-delete {
     background-color: red;
 }

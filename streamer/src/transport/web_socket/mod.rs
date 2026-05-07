@@ -9,14 +9,13 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use common::{
-    StreamSettings,
     api_bindings::{StreamClientMessage, StreamerStatsUpdate, TransportChannelId},
     ipc::{ServerIpcMessage, StreamerIpcMessage},
 };
 use log::{trace, warn};
 use moonlight_common::stream::{
     audio::{AudioConfig, OpusMultistreamConfig},
-    video::{DecodeResult, FrameType, SupportedVideoFormats, VideoDecodeUnit, VideoSetup},
+    video::{DecodeResult, FrameType, VideoDecodeUnit, VideoSetup},
 };
 use tokio::{
     spawn,
@@ -163,7 +162,7 @@ impl TransportSender for WebSocketTransportSender {
     }
     async fn send_video_unit<'a>(
         &'a self,
-        unit: &'a VideoDecodeUnit<'a>,
+        unit: VideoDecodeUnit<&'a [u8]>,
     ) -> Result<DecodeResult, TransportError> {
         let mut new_buffer = vec![0; 5];
 
@@ -176,7 +175,7 @@ impl TransportSender for WebSocketTransportSender {
         byte_buffer.put_u8(0);
         byte_buffer.put_u32(unit.timestamp.as_micros() as u32);
 
-        for buffer in unit.buffers {
+        for buffer in &unit.buffers {
             new_buffer.extend_from_slice(buffer.data);
         }
         // TODO: ignore h264/h265 fillerdata?
@@ -274,39 +273,11 @@ impl TransportSender for WebSocketTransportSender {
                     return Err(TransportError::Closed);
                 }
             }
-            ServerIpcMessage::WebSocket(StreamClientMessage::StartStream {
-                bitrate,
-                packet_size,
-                fps,
-                width,
-                height,
-                play_audio_local,
-                video_supported_formats,
-                video_colorspace,
-                video_color_range_full,
-                hdr,
-            }) => {
-                let video_supported_formats = SupportedVideoFormats::from_bits(video_supported_formats).unwrap_or_else(|| {
-                    warn!("Failed to deserialize SupportedVideoFormats: {video_supported_formats}, falling back to only H264");
-                    SupportedVideoFormats::H264
-                });
-
+            #[allow(clippy::collapsible_match)]
+            ServerIpcMessage::WebSocket(StreamClientMessage::StartStream { settings }) => {
                 if self
                     .event_sender
-                    .send(TransportEvent::StartStream {
-                        settings: StreamSettings {
-                            bitrate,
-                            packet_size,
-                            fps,
-                            width,
-                            height,
-                            video_supported_formats,
-                            video_color_range_full,
-                            video_colorspace: video_colorspace.into(),
-                            play_audio_local,
-                            hdr,
-                        },
-                    })
+                    .send(TransportEvent::StartStream { settings })
                     .await
                     .is_err()
                 {
@@ -317,6 +288,10 @@ impl TransportSender for WebSocketTransportSender {
             _ => {}
         }
         Ok(())
+    }
+
+    async fn on_setup_complete(&self) {
+        // empty
     }
 
     async fn close(&self) -> Result<(), TransportError> {

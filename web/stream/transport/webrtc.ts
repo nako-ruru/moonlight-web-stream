@@ -1,8 +1,8 @@
 import { StreamSignalingMessage, TransportChannelId } from "../../api_bindings.js";
 import { Logger } from "../log.js";
 import { StatValue } from "../stats.js";
-import { allVideoCodecs, CAPABILITIES_CODECS, emptyVideoCodecs, maybeVideoCodecs, VideoCodecSupport } from "../video.js";
-import { DataTransportChannel, Transport, TRANSPORT_CHANNEL_OPTIONS, TransportAudioSetup, TransportChannel, TransportChannelIdKey, TransportChannelIdValue, TransportVideoSetup, AudioTrackTransportChannel, VideoTrackTransportChannel, TrackTransportChannel, TransportShutdown } from "./index.js";
+import { CAPABILITIES_CODECS, emptyVideoCodecs, maybeVideoCodecs, VideoCodecSupport } from "../video.js";
+import { DataTransportChannel, Transport, TransportAudioSetup, TransportChannel, TransportChannelIdKey, TransportChannelIdValue, TransportVideoSetup, AudioTrackTransportChannel, VideoTrackTransportChannel, TrackTransportChannel, TransportShutdown } from "./index.js";
 
 export class WebRTCTransport implements Transport {
     implementationName: string = "webrtc"
@@ -24,10 +24,10 @@ export class WebRTCTransport implements Transport {
         }
 
         // Configure web rtc
+        // TODO: use this for signaling instead and extend the protocol so that the client also requests a control channel with name: "control", protocol:"moonlight-control-v1": https://www.ietf.org/archive/id/draft-ietf-wish-whep-02.html
         this.peer = new RTCPeerConnection(configuration)
         this.peer.addEventListener("error", this.onError.bind(this))
 
-        this.peer.addEventListener("negotiationneeded", this.onNegotiationNeeded.bind(this))
         this.peer.addEventListener("icecandidate", this.onIceCandidate.bind(this))
 
         this.peer.addEventListener("connectionstatechange", this.onConnectionStateChange.bind(this))
@@ -43,8 +43,6 @@ export class WebRTCTransport implements Transport {
         // Maybe we already received data
         if (this.remoteDescription) {
             await this.handleRemoteDescription(this.remoteDescription)
-        } else {
-            await this.onNegotiationNeeded()
         }
         await this.tryDequeueIceCandidates()
     }
@@ -79,29 +77,6 @@ export class WebRTCTransport implements Transport {
                 usernameFragment: candidate.username_fragment
             })
         }
-    }
-
-    private async onNegotiationNeeded() {
-        // We're polite
-        if (!this.peer) {
-            this.logger?.debug("OnNegotiationNeeded without a peer")
-            return
-        }
-
-        await this.peer.setLocalDescription()
-        const localDescription = this.peer.localDescription
-        if (!localDescription) {
-            this.logger?.debug("Failed to set local description in OnNegotiationNeeded")
-            return
-        }
-
-        this.logger?.debug(`OnNegotiationNeeded: Sending local description: ${localDescription.type}`)
-        this.sendMessage({
-            Description: {
-                ty: localDescription.type,
-                sdp: localDescription.sdp ?? ""
-            }
-        })
     }
 
     private remoteDescription: RTCSessionDescriptionInit | null = null
@@ -255,9 +230,8 @@ export class WebRTCTransport implements Transport {
             return
         }
 
-        for (const channelRaw in TRANSPORT_CHANNEL_OPTIONS) {
+        for (const channelRaw in TransportChannelId) {
             const channel = channelRaw as TransportChannelIdKey
-            const options = TRANSPORT_CHANNEL_OPTIONS[channel]
 
             if (channel == "HOST_VIDEO") {
                 const channel: VideoTrackTransportChannel = new WebRTCInboundTrackTransportChannel<"videotrack">(this.logger, "videotrack", "video", this.videoTrackHolder)
@@ -270,13 +244,9 @@ export class WebRTCTransport implements Transport {
                 continue
             }
 
+            // All Data Channels are created by the server
             const id = TransportChannelId[channel]
-            const dataChannel = options.serverCreated ? null : this.peer.createDataChannel(channel.toLowerCase(), {
-                ordered: options.ordered,
-                maxRetransmits: options.reliable ? undefined : 0
-            })
-
-            this.channels[id] = new WebRTCDataTransportChannel(channel, dataChannel)
+            this.channels[id] = new WebRTCDataTransportChannel(channel, null)
         }
     }
 
@@ -539,14 +509,19 @@ class WebRTCDataTransportChannel implements DataTransportChannel {
     canReceive: boolean = true
     canSend: boolean = true
 
+    private logger: Logger | null = null
+
     private label: string
     private channel: RTCDataChannel | null
+    private reportedMissing: boolean = false
     private boundOnMessage: (event: MessageEvent) => void
 
-    constructor(label: string, channel: RTCDataChannel | null) {
+    constructor(label: string, channel: RTCDataChannel | null, logger?: Logger) {
         this.label = label
         this.channel = channel
         this.boundOnMessage = this.onMessage.bind(this)
+
+        this.logger = logger ?? null
 
         this.channel?.addEventListener("message", this.boundOnMessage)
     }
@@ -567,7 +542,13 @@ class WebRTCDataTransportChannel implements DataTransportChannel {
         console.debug(this.label, message)
 
         if (!this.channel) {
-            throw `Failed to send message on channel ${this.label}`
+            console.debug(`Failed to send message on channel ${this.label}`)
+
+            if (!this.reportedMissing) {
+                this.logger?.debug(`Failed to send message on channel ${this.label}`)
+                this.reportedMissing = true
+            }
+            return
         }
 
         if (this.channel.readyState != "open") {

@@ -11,11 +11,11 @@ use std::{
 };
 
 use common::{
-    StreamSettings,
     api_bindings::{
         GeneralClientMessage, GeneralServerMessage, LogMessageType, StreamClientMessage,
-        TransportType,
+        StreamPermissions, StreamSettings, TransportType,
     },
+    apply_permissions_to_settings,
     ipc::{
         IpcReceiver, IpcSender, ServerIpcMessage, StreamerConfig, StreamerIpcMessage,
         create_process_ipc,
@@ -38,7 +38,9 @@ use moonlight_common::{
         },
         connection::ConnectionListener,
         control::{ActiveGamepads, ControllerButtons},
-        video::{ColorRange, VideoFormat, VideoSetup},
+        video::{
+            ColorRange, ColorSpace, SunshineHdrMetadata, VideoFormat, VideoFormats, VideoSetup,
+        },
     },
 };
 use tokio::{
@@ -111,6 +113,7 @@ async fn main() {
         app_id,
         video_frame_queue_size,
         audio_sample_queue_size,
+        permissions,
     ) = loop {
         match ipc_receiver.recv().await {
             Some(ServerIpcMessage::Init {
@@ -124,6 +127,7 @@ async fn main() {
                 app_id,
                 video_frame_queue_size,
                 audio_sample_queue_size,
+                permissions,
             }) => {
                 break (
                     config,
@@ -136,6 +140,7 @@ async fn main() {
                     app_id,
                     video_frame_queue_size,
                     audio_sample_queue_size,
+                    permissions,
                 );
             }
             _ => continue,
@@ -167,6 +172,9 @@ async fn main() {
         .with(env_filter)
         .with(stderr_output)
         .init();
+
+    // print permissions
+    info!("Got Permissions: {permissions:?}");
 
     // Send stage
     ipc_sender
@@ -211,6 +219,7 @@ async fn main() {
         config,
         video_frame_queue_size,
         audio_sample_queue_size,
+        permissions,
     )
     .await
     .expect("failed to create connection");
@@ -249,6 +258,7 @@ struct StreamConnection {
     pub config: StreamerConfig,
     pub info: StreamInfo,
     pub ipc_sender: IpcSender<StreamerIpcMessage>,
+    pub permissions: StreamPermissions,
     // Video
     pub video_frame_queue_size: usize,
     pub audio_sample_queue_size: usize,
@@ -272,6 +282,7 @@ impl StreamConnection {
         config: StreamerConfig,
         video_frame_queue_size: usize,
         audio_sample_queue_size: usize,
+        permissions: StreamPermissions,
     ) -> Result<Arc<Self>, anyhow::Error> {
         let this = Arc::new(Self {
             runtime: Handle::current(),
@@ -279,6 +290,7 @@ impl StreamConnection {
             config,
             info,
             ipc_sender,
+            permissions,
             stream_setup: Mutex::new(StreamSetup {
                 video: None,
                 audio: None,
@@ -611,13 +623,19 @@ impl StreamConnection {
         }
     }
 
-    async fn on_ipc_message(self: &Arc<StreamConnection>, message: ServerIpcMessage) {
-        match &message {
+    async fn on_ipc_message(self: &Arc<StreamConnection>, mut message: ServerIpcMessage) {
+        match &mut message {
+            ServerIpcMessage::WebSocket(StreamClientMessage::StartStream { settings }) => {
+                // Apply restrictions
+                apply_permissions_to_settings(&self.permissions, settings);
+
+                info!("Applied permissions to settings");
+            }
             ServerIpcMessage::WebSocket(StreamClientMessage::SetTransport(transport_type)) => {
                 self.clear_terminate_request().await;
 
                 match transport_type {
-                    TransportType::WebRTC => {
+                    TransportType::WebRTC if self.permissions.allow_transport_webrtc => {
                         info!("Trying WebRTC transport");
 
                         let (sender, events) = match webrtc::new(
@@ -635,7 +653,7 @@ impl StreamConnection {
                         };
                         self.set_transport(Box::new(sender), Box::new(events)).await;
                     }
-                    TransportType::WebSocket => {
+                    TransportType::WebSocket if self.permissions.allow_transport_websockets => {
                         info!("Trying Web Socket transport");
 
                         let (sender, events) = match web_socket::new().await {
@@ -646,6 +664,11 @@ impl StreamConnection {
                             }
                         };
                         self.set_transport(Box::new(sender), Box::new(events)).await;
+                    }
+                    transport => {
+                        warn!(
+                            "Client tried to select {transport:?}, but it was specifically disabled in the permissions -> ignoring request."
+                        );
                     }
                 }
             }
@@ -676,7 +699,7 @@ impl StreamConnection {
                 });
             }
         }
-        info!("Starting Moonlight stream with settings: {settings}");
+        info!("Starting Moonlight stream with settings: {settings:?}");
 
         // Send stage
         let mut ipc_sender = self.ipc_sender.clone();
@@ -693,7 +716,7 @@ impl StreamConnection {
 
         let video_decoder = StreamVideoDecoder {
             stream: Arc::downgrade(self),
-            supported_formats: settings.video_supported_formats,
+            supported_formats: VideoFormats::from_bits_retain(settings.supported_codecs),
             stats: Default::default(),
         };
 
@@ -714,22 +737,19 @@ impl StreamConnection {
             fps: settings.fps,
             fps_x100: settings.fps * 100,
             hdr: settings.hdr,
-            bitrate: settings.bitrate,
-            packet_size: settings.packet_size,
+            bitrate: settings.bitrate_kbps,
+            packet_size: 1024,
             encryption_flags: EncryptionFlags::ALL,
             streaming_remotely: StreamingConfig::Auto,
             sops: true,
-            supported_video_formats: settings.video_supported_formats,
-            color_space: settings.video_colorspace,
-            color_range: if settings.video_color_range_full {
-                ColorRange::Full
-            } else {
-                ColorRange::Limited
-            },
+            supported_video_formats: VideoFormats::from_bits_truncate(settings.supported_codecs),
+            color_space: ColorSpace::Rec709,
+            color_range: ColorRange::Limited,
             local_audio_play_mode: settings.play_audio_local,
             audio_config: AudioConfig::STEREO,
             gamepads_attached: ActiveGamepads::empty(),
             gamepads_persist_after_disconnect: false,
+            enable_mic: false,
         };
 
         let server_version = host.version().await?;
@@ -806,11 +826,11 @@ impl StreamConnection {
 
         let host_features = stream.host_features().unwrap_or_else(|err| {
             warn!("[Stream]: failed to get host features: {err:?}");
-            HostFeatures::empty()
+            HostFeatures::default()
         });
 
         let capabilities = StreamCapabilities {
-            touch: host_features.contains(HostFeatures::PEN_TOUCH_EVENTS),
+            touch: host_features.controller_touch,
         };
 
         let (video_setup, audio_setup) = {
@@ -853,6 +873,19 @@ impl StreamConnection {
 
         let mut stream_guard = self.stream.write().await;
         stream_guard.replace(stream);
+
+        {
+            let mut sender = self.transport_sender.lock().await;
+            match sender.as_mut() {
+                Some(sender) => {
+                    sender.on_setup_complete().await;
+                }
+                None => {
+                    warn!("No transport found after starting stream. Requesting Termination");
+                    self.request_terminate().await;
+                }
+            }
+        }
 
         Ok(())
     }
@@ -932,7 +965,7 @@ struct StreamConnectionListener {
 }
 
 impl ConnectionListener for StreamConnectionListener {
-    fn set_hdr_mode(&mut self, hdr_enabled: bool) {
+    fn set_hdr_mode(&mut self, hdr_enabled: bool, _sunshine: Option<SunshineHdrMetadata>) {
         info!(
             "[HDR] Host called set_hdr_mode with enabled={}",
             hdr_enabled

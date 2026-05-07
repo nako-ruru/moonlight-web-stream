@@ -2,9 +2,9 @@ use std::ops::Range;
 
 use async_trait::async_trait;
 use common::{
-    StreamSettings,
     api_bindings::{
-        GeneralClientMessage, GeneralServerMessage, StreamerStatsUpdate, TransportChannelId,
+        GeneralClientMessage, GeneralServerMessage, StreamSettings, StreamerStatsUpdate,
+        TransportChannelId,
     },
     ipc::{ServerIpcMessage, StreamerIpcMessage},
 };
@@ -626,7 +626,7 @@ pub trait TransportSender {
     async fn setup_video(&self, setup: VideoSetup) -> i32;
     async fn send_video_unit<'a>(
         &'a self,
-        unit: &'a VideoDecodeUnit<'a>,
+        unit: VideoDecodeUnit<&'a [u8]>,
     ) -> Result<DecodeResult, TransportError>;
 
     async fn setup_audio(
@@ -635,6 +635,8 @@ pub trait TransportSender {
         stream_config: OpusMultistreamConfig,
     ) -> i32;
     async fn send_audio_sample(&self, data: &[u8]) -> Result<(), TransportError>;
+
+    async fn on_setup_complete(&self);
 
     async fn send(&self, packet: OutboundPacket) -> Result<(), TransportError>;
 
