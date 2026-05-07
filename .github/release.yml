@@ -1,0 +1,13 @@
+changelog:
+  exclude:
+    authors:
+      - github-actions[bot] # Exclude automated version bump commits from the changelog
+  categories:
+    - title: "🚀 New Features"
+      labels:
+        - enhancement
+        - feature
+    - title: "🐛 Bug Fixes"
+      labels:
+        - bug
+        - fix
