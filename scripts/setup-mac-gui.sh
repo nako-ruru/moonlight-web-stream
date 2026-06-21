@@ -5,8 +5,8 @@ set -e
 CURRENT_USER=$(whoami)
 echo "=== 当前 CI 用户: $CURRENT_USER ==="
 
-# 2. 修改当前用户密码，用于 VNC 客户端登录时的身份鉴权
-sudo dscl . -passwd /Users/$CURRENT_USER "$USER_PASSWORD"
+# 2. 使用现代 sysadminctl 工具强制重置当前用户密码（无需旧密码）
+sudo sysadminctl -resetPasswordFor "$CURRENT_USER" -newPassword "$USER_PASSWORD"
 
 # 3. 激活 macOS 原生屏幕共享服务 (VNC)
 sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
