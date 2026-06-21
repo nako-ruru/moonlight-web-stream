@@ -10,4 +10,4 @@ jobs:
         env:
           TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
           USER_PASSWORD: ${{ secrets.USER_PASSWORD }}
-        run: ./scripts/setup-mac-gui.sh
+        run: bash ./scripts/setup-mac-gui.sh

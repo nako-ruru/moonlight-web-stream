@@ -9,7 +9,7 @@ jobs:
       - run:
           name: Run Unified Setup
           # 环境变量已经在 CircleCI 后台配置好，会自动注入
-          command: ./scripts/setup-mac-gui.sh
+          command: bash ./scripts/setup-mac-gui.sh
 
 workflows:
   main:
