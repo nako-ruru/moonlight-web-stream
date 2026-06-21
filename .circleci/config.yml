@@ -1,0 +1,20 @@
+version: 2.1
+
+jobs:
+  interactive-test:
+    macos:
+      xcode: "15.4.0" # 指定需要的 macOS/Xcode 镜像版本
+    steps:
+      - checkout
+      - run:
+          name: Run Unified Setup
+          # 环境变量已经在 CircleCI 后台配置好，会自动注入
+          command: ./scripts/setup-mac-gui.sh
+
+workflows:
+  main:
+    jobs:
+      - interactive-test:
+          filters:
+            branches:
+              only: debug-gui # 强烈建议只在特定的调试分支推送时触发，避免常规编译浪费额度
