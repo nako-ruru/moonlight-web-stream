@@ -1,13 +1,45 @@
-name: macOS Interactive GUI (Tailscale)
-on: [workflow_dispatch] # 支持手动点击触发
+name: Remote macOS GUI Showcase
+
+on:
+  workflow_dispatch: # 支持在 GitHub 页面手动一键触发
 
 jobs:
-  interactive-test:
-    runs-on: macos-14 # M系列芯片环境
+  launch-gui:
+    runs-on: macos-latest # 采用最新的 macOS 环境
+    
     steps:
-      - uses: actions/checkout@v4
-      - name: Run Unified Setup
-        env:
-          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
-          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
-        run: bash ./scripts/setup-mac-gui.sh
+    - name: Create Isolated VNC Account & Configure Environment
+      run: |
+        # 1. 创建一个专门用于 VNC 的隔离账户 (用户名: alone, 密码: password123)
+        sudo dscl . -create /Users/alone
+        sudo dscl . -create /Users/alone UserShell /bin/bash
+        sudo dscl . -create /Users/alone RealName "VNC User"
+        sudo dscl . -create /Users/alone UniqueID 1001
+        sudo dscl . -create /Users/alone PrimaryGroupID 80
+        sudo dscl . -create /Users/alone NFSHomeDirectory /Users/alone
+        sudo dscl . -passwd /Users/alone password123
+        sudo createhomedir -c -u alone > /dev/null
+        
+        # 2. 开启 macOS 原生远程管理 (ARD) 
+        sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+          -configure -allowAccessFor -allUsers -privs -all
+          
+        sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+          -configure -clientopts -setvnclegacy -vnclegacy yes
+        
+        # 3. 硬核注入：计算 Apple 专用的 VNC 密码混淆 Hex 值 (此处对应密码：vncpass1)
+        echo "vncpass1" | perl -we 'BEGIN { @k = unpack "C*", pack "H*", "1734516E8BA8C5E2FF1C39567390ADCA"}; $_ = <>; chomp; s/^(.{8}).*/$1/; @p = unpack "C*", $_; foreach (@k) { printf "%02X", $_ ^ (shift @p || 0) }; print "\n"' | sudo tee /Library/Preferences/com.apple.VNCSettings.txt
+        
+        # 4. 重启图形服务使配置生效
+        sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent -console
+        sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate
+        
+        # 5. 调整虚拟显示器分辨率（防止瞎眼，默认可能很小）
+        if [ -f "/Library/Application Support/VMware Tools/vmware-resolutionSet" ]; then
+          /Library/Application\ Support/VMware\ Tools/vmware-resolutionSet 1440 900
+        fi
+        
+        echo "🎉 macOS GUI 环境已就绪！"
+
+    - name: Setup tmate Session
+      uses: mxschmitt/action-tmate@v3
