@@ -1,7 +1,7 @@
 name: macOS Remote VNC via Tailscale
 
 on:
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch: # 允许你在 GitHub Actions 页面手动点击运行
 
 jobs:
   macos-vnc-session:
@@ -18,18 +18,32 @@ jobs:
           authkey: ${{ secrets.TS_AUTHKEY }}
           tags: tag:ci
 
-      # 2. 开启 macOS 原生远程桌面服务并打通权限
+      # 2. 动态创建全新管理员用户并开启 VNC
       - name: Setup macOS Native VNC
         run: |
-          # 【修复 1】使用 dscl 代替 sysadminctl 修改密码，绕过 Secure Token 限制
-          sudo dscl . -passwd /Users/runner "${{ secrets.VNC_PASSWORD }}"
+          # 【核心修复】创建专属的 VNC 用户，避开 runner 用户需要旧密码的限制
+          sudo dscl . -create /Users/vncuser
+          sudo dscl . -create /Users/vncuser UserShell /bin/bash
+          sudo dscl . -create /Users/vncuser RealName "VNC User"
+          sudo dscl . -create /Users/vncuser UniqueID 1099
+          sudo dscl . -create /Users/vncuser PrimaryGroupID 80
+          sudo dscl . -create /Users/vncuser NFSHomeDirectory /Users/vncuser
           
-          # 【修复 2】明确指定只为 runner 用户开启远程控制权限，规避全开导致的 TCC 屏蔽
+          # 为没有旧密码的新用户直接注入你设定的新密码
+          sudo dscl . -passwd /Users/vncuser "${{ secrets.VNC_PASSWORD }}"
+          
+          # 将新用户追加到管理员组 (admin)
+          sudo dscl . -append /Groups/admin GroupMembership vncuser
+          
+          # 【关键步骤】初始化新用户的家目录骨架，防止 VNC 登录后因缺少配置导致黑屏或桌面损坏
+          sudo createhomedir -c -u vncuser
+
+          # 明确指定只为新创建的 vncuser 用户开启远程控制权限
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -configure -allowAccessFor -specifiedUsers
           
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -access -on -privs -all -users runner
+            -access -on -privs -all -users vncuser
           
           # 重启并激活远程管理服务
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
@@ -45,10 +59,10 @@ jobs:
           echo "----------------------------------------------------------"
           echo "请在你的本地电脑上使用以下信息连接："
           echo "目标 IP 地址: $(tailscale ip -4)"
-          echo "登录用户名: runner"
+          echo "登录用户名: vncuser"
           echo "登录密码: （你在 GitHub Secrets 中设置的 VNC_PASSWORD）"
           echo "=========================================================="
           echo "流水线将保持运行 1 小时，超时后会自动销毁..."
 
-          # 挂起 1 小时供调试
+          # 挂起 1 小时供你调试
           sleep 3600
