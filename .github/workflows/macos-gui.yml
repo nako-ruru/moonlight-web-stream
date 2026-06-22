@@ -9,5 +9,5 @@ jobs:
       - name: Run Unified Setup
         env:
           TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
-          USER_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: bash ./scripts/setup-mac-gui.sh
