@@ -1,52 +1,168 @@
-name: macOS Remote VNC via Tailscale
+name: macOS CI
 
 on:
-  workflow_dispatch: # 允许你在 GitHub Actions 页面手动点击运行
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要构建的 Tag (对应母仓库版本号)"
+        required: true
+      run_x86:
+        description: "是否构建 macOS x86_64 (需要开启 Self-hosted)"
+        type: boolean
+        default: false
+      prerelease_flag:
+        description: "是否标记为预发布 (Pre-release)"
+        type: boolean
+        default: false
+      draft_flag:
+        description: "是否存为草稿 (Draft)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
 
 jobs:
-  macos-vnc-session:
-    runs-on: macos-latest # 使用 GitHub 提供的最新 macOS 环境 (M系列芯片)
+  # 1. 动态生成 Matrix
+  setup-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          # 默认包含 ARM (GitHub Runner)
+          CONF='{"include":[{"target":"aarch64-apple-darwin","os":"macos-latest","suffix":""}'
+          
+          # 如果勾选了 x86，则加入 self-hosted 任务
+          if [ "${{ github.event.inputs.run_x86 }}" == "true" ]; then
+            CONF+=',{"target":"x86_64-apple-darwin","os":"self-hosted","suffix":""}'
+          fi
+          
+          CONF+=']}'
+          echo "matrix=$CONF" >> $GITHUB_OUTPUT
+
+  build:
+    needs: setup-matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup-matrix.outputs.matrix) }}
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      # 1. 接入 Tailscale 网络（改用你手里的 Auth Key 方式）
-      - name: Connect to Tailscale
-        uses: tailscale/github-action@v4
+      - uses: actions/checkout@v5
         with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
-          tags: tag:ci
+          submodules: recursive
+          repository: MrCreativ3001/moonlight-web-stream
+          ref: ${{ github.event.inputs.tag }}
 
-      # 2. 开启 macOS 原生远程桌面服务并打通权限
-      - name: Setup macOS Native VNC
+      # Install node
+      - uses: actions/setup-node@v6
+        with:
+          node-version:  24
+
+      # Install rust
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-02-13
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cross-${{ matrix.target }}
+
+      # Install cross
+      - name: Install Cross
+        if: runner.os != 'macOS'
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Install Rust target (macOS only)
+        if: runner.os == 'macOS'
+        run: rustup target add ${{ matrix.target }}
+
+          # Build
+      - name: Build
         run: |
-          # 开启原生 ARD (Apple Remote Desktop) 远程管理
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -allowAccessFor -allUsers -privs -all
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            if [[ "${{ runner.arch }}" == "X64" ]]; then
+              export RUSTFLAGS="-C link-arg=$(ls /Library/Developer/CommandLineTools/usr/lib/clang/*/lib/darwin/libclang_rt.osx.a | head -n 1)"
+            fi    
+            cargo build --release --target ${{ matrix.target }}
+          else
+            cross build --release --target ${{ matrix.target }}
+          fi
 
-          # 【核心避坑点】直接修改当前活跃 GUI 用户 (runner) 的系统密码
-          # GitHub 默认的桌面和模拟器都在 runner 用户下运行，改它的密码才能直接看到正在跑的测试
-          echo "${{ secrets.USER_PASSWORD }}" | sudo dscl . -passwd /Users/runner
+          npm ci
+          npm run build
+          mv dist static
+          
+          rm -rf streamer${{ matrix.app-suffix }} web-server${{ matrix.app-suffix }}
+          mv target/${{ matrix.target }}/release/streamer${{ matrix.app-suffix }} streamer${{ matrix.app-suffix }}
+          mv target/${{ matrix.target }}/release/web-server${{ matrix.app-suffix }} web-server${{ matrix.app-suffix }}
+          chmod +x streamer${{ matrix.app-suffix }} web-server${{ matrix.app-suffix }}
 
-          # 重启并激活远程管理服务
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -restart -agent -console
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: moonlight-web-${{ matrix.target }}
+          path: |
+            streamer${{ matrix.app-suffix }}
+            web-server${{ matrix.app-suffix }}
+            static
 
-      # 3. 输出连接信息并挂起流水线
-      - name: Keep Alive & Show Connection Info
+  release:
+    name: Publish GitHub Release Artifacts
+    runs-on: ubuntu-latest
+    needs: [setup-matrix, build]
+    strategy:
+      matrix: ${{ fromJson(needs.setup-matrix.outputs.matrix) }}
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: moonlight-web-${{ matrix.target }}
+          path: dist
+
+      - name: Create archive
         run: |
-          echo "=========================================================="
-          echo "🎉 macOS 原生 VNC 服务已成功通过 Tailscale 穿透！"
-          echo "----------------------------------------------------------"
-          echo "请在你的本地电脑上使用以下信息连接："
-          echo "目标 IP 地址: $(tailscale ip -4)"
-          echo "登录用户名: runner"
-          echo "登录密码: （你在 GitHub Secrets 中设置的 VNC_PASSWORD）"
-          echo "=========================================================="
-          echo "流水线将保持运行 1 小时，超时后会自动销毁..."
+          mkdir package
+          mv dist/streamer${{ matrix.suffix }} package/
+          mv dist/web-server${{ matrix.suffix }} package/
+          mv dist/static package/
 
-          # 挂起 1 小时供你尽情调试，可以根据需要修改时间（单位：秒）
-          sleep 3600
+          ARCHIVE="moonlight-web-${{ matrix.target }}"
+
+          if [[ "${{ matrix.suffix }}" == ".exe" ]]; then
+            zip -r "$ARCHIVE.zip" package
+            echo "ASSET=$ARCHIVE.zip" >> $GITHUB_ENV
+          else
+            tar -czf "$ARCHIVE.tar.gz" package
+            echo "ASSET=$ARCHIVE.tar.gz" >> $GITHUB_ENV
+          fi
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          name: "Release ${{ github.event.inputs.tag }} (macOS Build)"
+          # 这里引用也要同步修改
+          prerelease: ${{ github.event.inputs.prerelease_flag }}
+          files: ${{ env.ASSET }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create static.zip
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          cd package
+          zip -r ../static.zip static
+
+      - name: Upload static.zip to release
+        if: matrix.target == 'aarch64-apple-darwin'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          draft: ${{ github.event.inputs.draft_flag }}
+          prerelease: ${{ github.event.inputs.prerelease_flag }}
+          files: static.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
