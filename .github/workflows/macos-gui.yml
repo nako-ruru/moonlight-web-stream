@@ -1,17 +1,17 @@
 name: macOS Remote VNC via Tailscale
 
 on:
-  workflow_dispatch: # 允许你在 GitHub Actions 页面手动点击运行
+  workflow_dispatch: # 允许手动触发
 
 jobs:
   macos-vnc-session:
-    runs-on: macos-latest # 使用 GitHub 提供的最新 macOS 环境 (M系列芯片)
+    runs-on: macos-latest # 使用 GitHub 提供的最新 macOS 环境
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 1. 接入 Tailscale 网络（改用你手里的 Auth Key 方式）
+      # 1. 接入 Tailscale 网络
       - name: Connect to Tailscale
         uses: tailscale/github-action@v4
         with:
@@ -21,12 +21,15 @@ jobs:
       # 2. 开启 macOS 原生远程桌面服务并打通权限
       - name: Setup macOS Native VNC
         run: |
-          # 开启原生 ARD (Apple Remote Desktop) 远程管理
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -allowAccessFor -allUsers -privs -all
+          # 【修复 1】使用 dscl 代替 sysadminctl 修改密码，绕过 Secure Token 限制
+          sudo dscl . -passwd /Users/runner "${{ secrets.VNC_PASSWORD }}"
           
-          # 【修复此行】使用 sysadminctl 强制覆盖 runner 用户密码，无需旧密码
-          sudo sysadminctl -resetPasswordFor runner -newPassword "${{ secrets.VNC_PASSWORD }}"
+          # 【修复 2】明确指定只为 runner 用户开启远程控制权限，规避全开导致的 TCC 屏蔽
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -allowAccessFor -specifiedUsers
+          
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -configure -access -on -privs -all -users runner
           
           # 重启并激活远程管理服务
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
@@ -47,5 +50,5 @@ jobs:
           echo "=========================================================="
           echo "流水线将保持运行 1 小时，超时后会自动销毁..."
 
-          # 挂起 1 小时供你尽情调试，可以根据需要修改时间（单位：秒）
+          # 挂起 1 小时供调试
           sleep 3600
