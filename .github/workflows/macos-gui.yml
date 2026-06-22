@@ -1,68 +1,13 @@
-name: macOS Remote VNC via Tailscale
-
-on:
-  workflow_dispatch: # 允许你在 GitHub Actions 页面手动点击运行
+name: macOS Interactive GUI (Tailscale)
+on: [workflow_dispatch] # 支持手动点击触发
 
 jobs:
-  macos-vnc-session:
-    runs-on: macos-latest # 使用 GitHub 提供的最新 macOS 环境
-
+  interactive-test:
+    runs-on: macos-14 # M系列芯片环境
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      # 1. 接入 Tailscale 网络
-      - name: Connect to Tailscale
-        uses: tailscale/github-action@v4
-        with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
-          tags: tag:ci
-
-      # 2. 动态创建全新管理员用户并开启 VNC
-      - name: Setup macOS Native VNC
-        run: |
-          # 【核心修复】创建专属的 VNC 用户，避开 runner 用户需要旧密码的限制
-          sudo dscl . -create /Users/vncuser
-          sudo dscl . -create /Users/vncuser UserShell /bin/bash
-          sudo dscl . -create /Users/vncuser RealName "VNC User"
-          sudo dscl . -create /Users/vncuser UniqueID 1099
-          sudo dscl . -create /Users/vncuser PrimaryGroupID 80
-          sudo dscl . -create /Users/vncuser NFSHomeDirectory /Users/vncuser
-          
-          # 为没有旧密码的新用户直接注入你设定的新密码
-          sudo dscl . -passwd /Users/vncuser "${{ secrets.VNC_PASSWORD }}"
-          
-          # 将新用户追加到管理员组 (admin)
-          sudo dscl . -append /Groups/admin GroupMembership vncuser
-          
-          # 【关键步骤】初始化新用户的家目录骨架，防止 VNC 登录后因缺少配置导致黑屏或桌面损坏
-          sudo createhomedir -c -u vncuser
-
-          # 明确指定只为新创建的 vncuser 用户开启远程控制权限
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -configure -allowAccessFor -specifiedUsers
-          
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -access -on -privs -all -users vncuser
-          
-          # 重启并激活远程管理服务
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -restart -agent -console
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate
-
-      # 3. 输出连接信息并挂起流水线
-      - name: Keep Alive & Show Connection Info
-        run: |
-          echo "=========================================================="
-          echo "🎉 macOS 原生 VNC 服务已成功通过 Tailscale 穿透！"
-          echo "----------------------------------------------------------"
-          echo "请在你的本地电脑上使用以下信息连接："
-          echo "目标 IP 地址: $(tailscale ip -4)"
-          echo "登录用户名: vncuser"
-          echo "登录密码: （你在 GitHub Secrets 中设置的 VNC_PASSWORD）"
-          echo "=========================================================="
-          echo "流水线将保持运行 1 小时，超时后会自动销毁..."
-
-          # 挂起 1 小时供你调试
-          sleep 3600
+      - uses: actions/checkout@v4
+      - name: Run Unified Setup
+        env:
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+          USER_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: bash ./scripts/setup-mac-gui.sh
