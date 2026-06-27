@@ -1,0 +1,13 @@
+workflows:
+  vnc-manual-test:
+    name: macOS Remote GUI Manual Test
+    instance_type: mac_mini_m1
+    max_build_duration: 60
+    scripts:
+      - name: Hold instance for testing
+        script: |
+          echo "========================================================"
+          echo "已经进入测试等待阶段，请在 Codemagic 网页端开启 VNC 连接！"
+          echo "========================================================"
+          # 强制卡住系统 45 分钟（2700秒），留够时间让你远程下载和点击测试
+          sleep 2700
