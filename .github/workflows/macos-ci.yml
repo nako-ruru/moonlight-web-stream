@@ -43,6 +43,7 @@ jobs:
 
       - name: Build Web
         run: |
+          rustup target add wasm32-unknown-unknown --toolchain nightly-2026-02-13
           npm ci
           npm run build
           mv dist static
