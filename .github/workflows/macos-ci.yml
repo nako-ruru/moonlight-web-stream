@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   build-static:
-    name: Build Static ZIP
+    name: Build Static ZIP and WASM Asset
     runs-on: ubuntu-latest
 
     steps:
@@ -49,17 +49,24 @@ jobs:
           npm run build
           mv dist static
 
-      - name: Create static.zip
+      - name: Separate WASM and create static.zip
         run: |
+          # 提取出 wasm 文件单独命名或放置
+          find static -name "*.wasm" -exec cp {} wasm_asset.wasm \;
+          # 可选：如果希望从 static.zip 中移除 wasm 以减小体积，可以解开下面这行
+          # find static -name "*.wasm" -delete
+
           zip -r static.zip static
 
-      - name: Upload static.zip to release
+      - name: Upload static.zip and wasm to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag }}
           name: "Release ${{ github.event.inputs.tag }}"
           draft: ${{ github.event.inputs.draft_flag }}
           prerelease: ${{ github.event.inputs.prerelease_flag }}
-          files: static.zip
+          files: |
+            static.zip
+            wasm_asset.wasm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
