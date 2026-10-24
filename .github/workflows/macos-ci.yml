@@ -51,10 +51,10 @@ jobs:
 
       - name: Separate WASM and create static.zip
         run: |
-          # 提取出 wasm 文件单独命名或放置
-          find static -name "*.wasm" -exec cp {} wasm_asset.wasm \;
-          # 可选：如果希望从 static.zip 中移除 wasm 以减小体积，可以解开下面这行
-          # find static -name "*.wasm" -delete
+          # 提取 wasm 到根目录，保留原始 hash 文件名（不重命名）
+          find static -name "*.wasm" -exec cp {} . \;
+          # 从 static.zip 中排除 wasm，减小预热包体积
+          find static -name "*.wasm" -delete
 
           zip -r static.zip static
 
@@ -67,6 +67,6 @@ jobs:
           prerelease: ${{ github.event.inputs.prerelease_flag }}
           files: |
             static.zip
-            wasm_asset.wasm
+            *.wasm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
