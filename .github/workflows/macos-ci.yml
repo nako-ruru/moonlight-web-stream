@@ -1,10 +1,10 @@
-name: Static ZIP CI
+name: Extract WASM Assets
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "要构建的 Tag (对应母仓库版本号)"
+        description: "要处理的 Tag (对应上游 release 版本号)"
         required: true
       prerelease_flag:
         description: "是否标记为预发布 (Pre-release)"
@@ -19,54 +19,58 @@ permissions:
   contents: write
 
 jobs:
-  build-static:
-    name: Build Static ZIP and WASM Asset
+  extract-wasm:
+    name: Extract WASM (${{ matrix.name }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: aarch64-apple-darwin
+            asset: moonlight-web-aarch64-apple-darwin.tar.gz
+          - name: aarch64-unknown-linux-gnu
+            asset: moonlight-web-aarch64-unknown-linux-gnu.tar.gz
+          - name: aarch64-unknown-linux-musl
+            asset: moonlight-web-aarch64-unknown-linux-musl.tar.gz
+          - name: x86_64-apple-darwin
+            asset: moonlight-web-x86_64-apple-darwin.tar.gz
+          - name: x86_64-pc-windows-gnu
+            asset: moonlight-web-x86_64-pc-windows-gnu.zip
+          - name: x86_64-unknown-linux-gnu
+            asset: moonlight-web-x86_64-unknown-linux-gnu.tar.gz
+          - name: x86_64-unknown-linux-musl
+            asset: moonlight-web-x86_64-unknown-linux-musl.tar.gz
 
     steps:
-      - uses: actions/checkout@v5
-        with:
-          submodules: recursive
-          repository: MrCreativ3001/moonlight-web-stream
-          ref: ${{ github.event.inputs.tag }}
-
-      # Install node
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-
-      # Install rust (needed for prebuild scripts like generate-bindings)
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: nightly-2026-02-13
-          targets: wasm32-unknown-unknown
-
-      - name: Build Web
+      - name: Download upstream archive
         run: |
-          rustup target add wasm32-unknown-unknown --toolchain nightly-2026-02-13
-          cargo install wasm-bindgen-cli --version 0.2.128
-          npm ci
-          npm run build
-          mv dist static
+          URL="https://github.com/MrCreativ3001/moonlight-web-stream/releases/download/${{ inputs.tag }}/${{ matrix.asset }}"
+          echo "Downloading $URL"
+          curl -fL --retry 3 -o archive "$URL"
 
-      - name: Separate WASM and create static.zip
+      - name: Extract WASM (keep original hashed filename)
         run: |
-          # 提取 wasm 到根目录，保留原始 hash 文件名（不重命名）
-          find static -name "*.wasm" -exec cp {} . \;
-          # 从 static.zip 中排除 wasm，减小预热包体积
-          find static -name "*.wasm" -delete
+          mkdir -p extracted out
+          case "${{ matrix.asset }}" in
+            *.zip) unzip -q archive -d extracted ;;
+            *.tar.gz) tar -xzf archive -C extracted ;;
+            *) echo "Unknown archive type: ${{ matrix.asset }}"; exit 1 ;;
+          esac
 
-          zip -r static.zip static
+          # 只提取 wasm，保留原始 hash 文件名（与 archive 内 stream.js 的引用一致）
+          find extracted -name '*.wasm' -exec cp {} out/ \;
 
-      - name: Upload static.zip and wasm to release
+          echo "Extracted:"
+          ls -la out
+          test -n "$(ls -A out)" || { echo "No .wasm found in ${{ matrix.asset }}"; exit 1; }
+
+      - name: Upload WASM to release assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag }}
-          name: "Release ${{ github.event.inputs.tag }}"
-          draft: ${{ github.event.inputs.draft_flag }}
-          prerelease: ${{ github.event.inputs.prerelease_flag }}
-          files: |
-            static.zip
-            *.wasm
+          tag_name: ${{ inputs.tag }}
+          name: "Release ${{ inputs.tag }}"
+          draft: ${{ inputs.draft_flag }}
+          prerelease: ${{ inputs.prerelease_flag }}
+          files: out/*.wasm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
