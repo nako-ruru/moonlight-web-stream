@@ -20,49 +20,112 @@ permissions:
 
 jobs:
   extract-wasm:
-    name: Extract WASM (${{ matrix.name }})
+    name: Extract and dedup WASM
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: aarch64-apple-darwin
-            asset: moonlight-web-aarch64-apple-darwin.tar.gz
-          - name: aarch64-unknown-linux-gnu
-            asset: moonlight-web-aarch64-unknown-linux-gnu.tar.gz
-          - name: aarch64-unknown-linux-musl
-            asset: moonlight-web-aarch64-unknown-linux-musl.tar.gz
-          - name: x86_64-apple-darwin
-            asset: moonlight-web-x86_64-apple-darwin.tar.gz
-          - name: x86_64-pc-windows-gnu
-            asset: moonlight-web-x86_64-pc-windows-gnu.zip
-          - name: x86_64-unknown-linux-gnu
-            asset: moonlight-web-x86_64-unknown-linux-gnu.tar.gz
-          - name: x86_64-unknown-linux-musl
-            asset: moonlight-web-x86_64-unknown-linux-musl.tar.gz
 
     steps:
-      - name: Download upstream archive
+      # 单 job 下载全部上游 archive（不用 matrix，避免多 job 上传同名 asset 互相覆盖）
+      - name: Download all upstream archives
         run: |
-          URL="https://github.com/MrCreativ3001/moonlight-web-stream/releases/download/${{ inputs.tag }}/${{ matrix.asset }}"
-          echo "Downloading $URL"
-          curl -fL --retry 3 -o archive "$URL"
+          set -euo pipefail
+          mkdir -p archives
+          ASSETS=(
+            moonlight-web-aarch64-apple-darwin.tar.gz
+            moonlight-web-aarch64-unknown-linux-gnu.tar.gz
+            moonlight-web-aarch64-unknown-linux-musl.tar.gz
+            moonlight-web-x86_64-apple-darwin.tar.gz
+            moonlight-web-x86_64-pc-windows-gnu.zip
+            moonlight-web-x86_64-unknown-linux-gnu.tar.gz
+            moonlight-web-x86_64-unknown-linux-musl.tar.gz
+          )
+          for asset in "${ASSETS[@]}"; do
+            url="https://github.com/MrCreativ3001/moonlight-web-stream/releases/download/${{ inputs.tag }}/${asset}"
+            echo "Downloading ${url}"
+            curl -fL --retry 3 -o "archives/${asset}" "${url}"
+          done
+          ls -la archives
 
-      - name: Extract WASM (keep original hashed filename)
+      # 逐个 archive 提取 wasm，日志里记录每个 archive 提取出的 wasm 名字/大小/hash；
+      # 同名 wasm 必须 size+hash 完全一致才视为合法，否则 fail 等人工介入。
+      - name: Extract WASM and verify duplicates are identical
         run: |
-          mkdir -p extracted out
-          case "${{ matrix.asset }}" in
-            *.zip) unzip -q archive -d extracted ;;
-            *.tar.gz) tar -xzf archive -C extracted ;;
-            *) echo "Unknown archive type: ${{ matrix.asset }}"; exit 1 ;;
-          esac
+          python3 - <<'PYEOF'
+          import hashlib
+          import sys
+          import tarfile
+          import zipfile
+          from pathlib import Path
 
-          # 只提取 wasm，保留原始 hash 文件名（与 archive 内 stream.js 的引用一致）
-          find extracted -name '*.wasm' -exec cp {} out/ \;
+          ARCHIVES_DIR = Path("archives")
+          OUT_DIR = Path("out")
 
-          echo "Extracted:"
-          ls -la out
-          test -n "$(ls -A out)" || { echo "No .wasm found in ${{ matrix.asset }}"; exit 1; }
+          def sha256_of(data: bytes) -> str:
+              return hashlib.sha256(data).hexdigest()
+
+          def handle_entry(name_in_archive: str, data: bytes, seen: dict) -> int:
+              name = Path(name_in_archive).name
+              size = len(data)
+              sha = sha256_of(data)
+              print(f"  extracted: {name} (size={size} sha256={sha})")
+              if name in seen:
+                  prev_size, prev_sha = seen[name]
+                  if prev_sha == sha and prev_size == size:
+                      print(f"    -> duplicate of already seen '{name}', identical size+hash, OK")
+                      return 0
+                  print(
+                      f"::error::Same wasm name '{name}' with DIFFERENT content across archives "
+                      f"(first seen size={prev_size} sha256={prev_sha} vs size={size} sha256={sha}). "
+                      f"Manual intervention required."
+                  )
+                  return 1
+              seen[name] = (size, sha)
+              (OUT_DIR / name).write_bytes(data)
+              print(f"    -> new wasm, added to out/")
+              return 0
+
+          def main() -> int:
+              OUT_DIR.mkdir(exist_ok=True)
+              seen: dict = {}
+              mismatch = 0
+              for archive in sorted(ARCHIVES_DIR.iterdir()):
+                  print(f"=== {archive.name} ===")
+                  found_any = False
+                  if archive.name.endswith(".tar.gz"):
+                      with tarfile.open(archive, "r:gz") as tf:
+                          for m in tf.getmembers():
+                              if not (m.isfile() and m.name.endswith(".wasm")):
+                                  continue
+                              found_any = True
+                              data = tf.extractfile(m).read()
+                              mismatch |= handle_entry(m.name, data, seen)
+                  elif archive.name.endswith(".zip"):
+                      with zipfile.ZipFile(archive) as zf:
+                          for info in zf.infolist():
+                              if info.is_dir() or not info.filename.endswith(".wasm"):
+                                  continue
+                              found_any = True
+                              data = zf.read(info.filename)
+                              mismatch |= handle_entry(info.filename, data, seen)
+                  else:
+                      print(f"::error::Unknown archive type: {archive.name}")
+                      return 1
+
+                  if not found_any:
+                      print(f"::error::No .wasm found in {archive.name}")
+                      return 1
+
+              if mismatch:
+                  print("::error::Duplicate wasm names resolved to different content; refusing to publish.")
+                  return 1
+
+              print("=== Deduplicated WASM to publish ===")
+              for f in sorted(OUT_DIR.iterdir()):
+                  print(f"  {f.name} size={f.stat().st_size}")
+              print("SCRIPT_OK")
+              return 0
+
+          sys.exit(main())
+          PYEOF
 
       - name: Upload WASM to release assets
         uses: softprops/action-gh-release@v2
