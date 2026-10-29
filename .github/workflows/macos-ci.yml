@@ -24,25 +24,62 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 单 job 下载全部上游 archive（不用 matrix，避免多 job 上传同名 asset 互相覆盖）
+      # 单 job 下载全部上游 archive（不用 matrix，避免多 job 上传同名 asset 互相覆盖）。
+      # asset 列表不写死：按选中的 tag 动态遍历 release assets，
+      # 排除 GitHub 自动生成的两个 source code 包，只拉取 .tar.gz / .zip。
       - name: Download all upstream archives
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           mkdir -p archives
-          ASSETS=(
-            moonlight-web-aarch64-apple-darwin.tar.gz
-            moonlight-web-aarch64-unknown-linux-gnu.tar.gz
-            moonlight-web-aarch64-unknown-linux-musl.tar.gz
-            moonlight-web-x86_64-apple-darwin.tar.gz
-            moonlight-web-x86_64-pc-windows-gnu.zip
-            moonlight-web-x86_64-unknown-linux-gnu.tar.gz
-            moonlight-web-x86_64-unknown-linux-musl.tar.gz
-          )
-          for asset in "${ASSETS[@]}"; do
-            url="https://github.com/MrCreativ3001/moonlight-web-stream/releases/download/${{ inputs.tag }}/${asset}"
-            echo "Downloading ${url}"
-            curl -fL --retry 3 -o "archives/${asset}" "${url}"
-          done
+
+          echo "Fetching release assets for tag ${TAG}"
+          curl -fL --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -o release.json \
+            "https://api.github.com/repos/MrCreativ3001/moonlight-web-stream/releases/tags/${TAG}" \
+            || { echo "::error::Release '${TAG}' not found in upstream repo"; exit 1; }
+
+          python3 - <<'PYEOF' > download-urls.txt
+          import json
+          import sys
+          from pathlib import Path
+
+          rel = json.loads(Path("release.json").read_text(encoding="utf-8"))
+          urls = []
+          for asset in rel.get("assets") or []:
+              name = (asset.get("name") or "").lower()
+              url = asset.get("browser_download_url") or ""
+              # 只拉取 .tar.gz / .zip
+              if not (name.endswith(".tar.gz") or name.endswith(".zip")):
+                  print(f"skip (not archive): {asset.get('name')}", file=sys.stderr)
+                  continue
+              # 排除 GitHub 自动生成的 source code 包（双保险，通常不在 assets 列表里）
+              if name.startswith("source code") or "/archive/" in url:
+                  print(f"skip (source code): {asset.get('name')}", file=sys.stderr)
+                  continue
+              urls.append(url)
+              print(f"selected: {asset.get('name')}", file=sys.stderr)
+
+          if not urls:
+              print("::error::No .tar.gz/.zip assets found in release", file=sys.stderr)
+              sys.exit(1)
+          print("\n".join(urls))
+          PYEOF
+
+          echo "Download list:"
+          cat download-urls.txt
+
+          while IFS= read -r url; do
+            name=$(basename "$url")
+            echo "Downloading ${name} <- ${url}"
+            curl -fL --retry 3 -o "archives/${name}" "${url}"
+          done < download-urls.txt
+
+          echo "Downloaded archives:"
           ls -la archives
 
       # 逐个 archive 提取 wasm，日志里记录每个 archive 提取出的 wasm 名字/大小/hash；
